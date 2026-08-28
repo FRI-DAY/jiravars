@@ -80,16 +80,17 @@ func addHeaders(r *http.Request, headers map[string]string) {
 	}
 }
 
-func check(ctx context.Context, log *logrus.Logger, cfg *configuration, wg *sync.WaitGroup) {
+func check(ctx context.Context, log *logrus.Logger, cfg *configuration, client *http.Client) {
+	wg := sync.WaitGroup{}
+	wg.Add(len(cfg.Metrics))
 	for idx, m := range cfg.Metrics {
 		go func(idx int, m metricConfiguration) {
+			defer wg.Done()
 			timer := time.NewTicker(m.ParsedInterval)
 			params := url.Values{}
 			params.Set("jql", m.JQL)
 			params.Set("maxResults", "0")
 			u := fmt.Sprintf("%s/rest/api/2/search?%s", cfg.BaseURL, params.Encode())
-
-			client := http.Client{}
 
 			defer timer.Stop()
 		loop:
@@ -130,24 +131,25 @@ func check(ctx context.Context, log *logrus.Logger, cfg *configuration, wg *sync
 				}
 			}
 			log.Infof("Stopping worker for %s", m.Name)
-			defer wg.Done()
 		}(idx, m)
 	}
+	wg.Wait()
 }
 
-func setupGauges(metrics []metricConfiguration) error {
+func setupGauges(registry prometheus.Registerer, metrics []metricConfiguration) error {
 	for i := 0; i < len(metrics); i++ {
 		metrics[i].Gauge = prometheus.NewGauge(prometheus.GaugeOpts{
 			Name:        fmt.Sprintf("jira_%s", metrics[i].Name),
 			ConstLabels: metrics[i].Labels,
 			Help:        metrics[i].Help,
 		})
-		if err := prometheus.Register(metrics[i].Gauge); err != nil {
+		if err := registry.Register(metrics[i].Gauge); err != nil {
 			return err
 		}
 	}
 	return nil
 }
+
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -175,13 +177,22 @@ func main() {
 		log.WithError(err).Fatalf("Failed to load config from %s", configFile)
 	}
 
-	if err := setupGauges(cfg.Metrics); err != nil {
+	if cfg.Password == "" {
+		cfg.Password = os.Getenv("JIRA_PASSWORD")
+	}
+
+	if cfg.Password == "" {
+		log.Fatal("Please specify a jira password via configuration or JIRA_PASSWORD environment variable")
+	}
+
+	if err := setupGauges(prometheus.DefaultRegisterer, cfg.Metrics); err != nil {
 		log.WithError(err).Fatal("Failed to setup gauges")
 	}
 
 	sigChan := make(chan os.Signal)
 	signal.Notify(sigChan, syscall.SIGINT)
 	httpServer := http.Server{}
+	httpClient := http.Client{}
 
 	wg := sync.WaitGroup{}
 	wg.Add(len(cfg.Metrics) + 2)
@@ -193,7 +204,10 @@ func main() {
 		defer wg.Done()
 	}()
 
-	go check(ctx, log, cfg, &wg)
+	go func() {
+		defer wg.Done()
+		check(ctx, log, cfg, &httpClient)
+	}()
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())

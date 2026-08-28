@@ -13,7 +13,8 @@ issues is exported as a Gauge to Prometheus.
 ## Configuration
 
 The configuration is rather minimal: All you need are some JIRA credentials and
-the metrics that you want to collect.
+the metrics that you want to collect. The JIRA password can optonally be passed 
+via environment variable `JIRA_PASSWORD`.
 
 Sample configuration:
 
